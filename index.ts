@@ -1,4 +1,4 @@
-import {newPool} from "./newPool";
+import {newPool, FieldType} from "./newPool";
 
 
 

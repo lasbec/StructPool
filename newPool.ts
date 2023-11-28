@@ -16,7 +16,7 @@ type PoolClass<PoolId extends string, S extends Struct<Field, Value>, Field exte
     & Prefix<"get",{ [key in keyof S]: ((id:Handle<PoolId>) => S[key]) }>
     & Prefix<"set",{ [key in keyof S]: ((id:Handle<PoolId>, value:S[key]) => void) }>
 
-const FieldType = {
+export const FieldType = {
     Uint8: 0 ,
     Int8: 1,
     Uint16: 2,
@@ -40,17 +40,19 @@ for(const [key, value] of Object.entries(FieldType)){
 }
 
 
-function newPool<PoolId extends string, S extends Struct<Field, Value>, Field extends string, Value extends number | (number & { __discriminator__: string; })>(id: PoolId, struct: S, capacity: number): PoolClass<PoolId, S, Field, Value> {
-    const structTypeArray = [...Object.values(struct)] as ReadonlyArray<FieldType>;
+export function newPool<PoolId extends string, S extends Struct<Field, Value>, Field extends string, Value extends number | (number & { __discriminator__: string; })>(id: PoolId, struct: S, capacity: number): PoolClass<PoolId, S, Field, Value> {
+    const structTypeArray = [...Object.values(struct)] as ReadonlyArray<Value>;
     const bytesToStoreObjectIndex = 2;
     const bytesToStoreObjectVersion = 2;
     const bytesToStoreObjectHandle = bytesToStoreObjectIndex + bytesToStoreObjectVersion;
     const objectVersionOffset = 0;
+    /** @ts-ignore */
     const fieldSizeInBytes = structTypeArray.reduce((a: number, b: FieldType): number => a + sizeInBytes(b), 0) + bytesToStoreObjectHandle;
     const poolBuffer = new ArrayBuffer(fieldSizeInBytes * capacity);
-    const poolView = new DataView(poolBuffer);
+    const poolView = new DataView(poolBuffer, 0, poolBuffer.byteLength);
 
-    const freeSlots = new Uint32Array(new ArrayBuffer(capacity * bytesToStoreObjectHandle + 1)).map((_, i) => i);
+    const freeSlotsBuffer = new ArrayBuffer((capacity + 1) * bytesToStoreObjectHandle);
+    const freeSlots = new Uint32Array(freeSlotsBuffer, 0, capacity +1).map((_, i) => i);
     let freeSlotsHead = capacity;
     let freeSlotsTail = 0;
 
