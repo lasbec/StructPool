@@ -39,21 +39,28 @@ for(const [key, value] of Object.entries(FieldType)){
     throw Error(`Invalid field type '${t}'`);
 }
 
+function calculateSlotSizeInBytes(structTypeArray: ReadonlyArray<FieldType>, bytesToStoreObjectHandle:number){
+    let result = bytesToStoreObjectHandle;
+    for(const t of structTypeArray){
+        result += sizeInBytes(t);
+    }
+    return result;
+}
+
 
 export function newPool<PoolId extends string, S extends Struct<Field, Value>, Field extends string, Value extends number | (number & { __discriminator__: string; })>(id: PoolId, struct: S, capacity: number): PoolClass<PoolId, S, Field, Value> {
-    const structTypeArray = [...Object.values(struct)] as ReadonlyArray<Value>;
+    const structTypeArray = [...Object.values(struct)] as ReadonlyArray<FieldType>;
     const bytesToStoreObjectIndex = 2;
     const bytesToStoreObjectVersion = 2;
     const bytesToStoreObjectHandle = bytesToStoreObjectIndex + bytesToStoreObjectVersion;
     const objectVersionOffset = 0;
-    /** @ts-ignore */
-    const fieldSizeInBytes = structTypeArray.reduce((a: number, b: FieldType): number => a + sizeInBytes(b), 0) + bytesToStoreObjectHandle;
-    const poolBuffer = new ArrayBuffer(fieldSizeInBytes * capacity);
+    const slotSizeInBytes = calculateSlotSizeInBytes(structTypeArray, bytesToStoreObjectHandle);
+    const poolBuffer = new ArrayBuffer(slotSizeInBytes * capacity);
     const poolView = new DataView(poolBuffer, 0, poolBuffer.byteLength);
 
     const freeSlotsBuffer = new ArrayBuffer((capacity + 1) * bytesToStoreObjectHandle);
     const freeSlots = new Uint32Array(freeSlotsBuffer, 0, capacity +1).map((_, i) => i);
-    let freeSlotsHead = capacity;
+    let freeSlotsHead = capacity - 1;
     let freeSlotsTail = 0;
 
     let deactavatedSlots = 0;
@@ -77,30 +84,24 @@ export function newPool<PoolId extends string, S extends Struct<Field, Value>, F
 
 
     function getField(propertyByteOffset: number, fieldTypeName: FieldTypeName) {
-        const getFn = poolView[`get${fieldTypeName}`];
+        const getFn = poolView[`get${fieldTypeName}`].bind(poolView);
         return (handle: Handle<PoolId>) => {
             return getFn(byteOffset(handle) + propertyByteOffset);
         };
     }
 
     function setField(propertyByteOffset: number, fieldTypeName: FieldTypeName) {
-        const setFn = poolView[`set${fieldTypeName}`];
+        const setFn = poolView[`set${fieldTypeName}`].bind(poolView);
         return (handle: Handle<PoolId>, n: number) => {
             setFn(byteOffset(handle) + propertyByteOffset, n);
         };
-    }
-
-    function validateHandle(id: Handle<PoolId>) {
-        const index = id & indexMask;
-        return 0 < index && index <= capacity // validate range
-            && getStoredHandle(id) === id; // validate object version
     }
 
     const indexMask = Math.pow(2, bytesToStoreObjectIndex * 8);
     const versionMask = Math.pow(2, bytesToStoreObjectVersion * 8) << bytesToStoreObjectIndex * 8;
 
     function byteOffset(id: Handle<PoolId>): number {
-        return (id & indexMask) * fieldSizeInBytes;
+        return (id & indexMask) * slotSizeInBytes;
     }
 
     function version(id: Handle<PoolId>) {
@@ -110,7 +111,7 @@ export function newPool<PoolId extends string, S extends Struct<Field, Value>, F
     function initializeZero(id: Handle<PoolId>) {
         const offset = byteOffset(id);
         // important: skip the bytes that store the object version
-        for (let i = bytesToStoreObjectHandle; i < fieldSizeInBytes; i += 1) {
+        for (let i = bytesToStoreObjectHandle; i < slotSizeInBytes; i += 1) {
             poolView.setUint8(offset + i, 0);
         }
     }
@@ -121,13 +122,17 @@ export function newPool<PoolId extends string, S extends Struct<Field, Value>, F
         return (index | vPlus) as Handle<PoolId>;
     }
 
-    function allocateSlot(): Handle<PoolId> {
+    // -------------------------------------------------------------------------------------------------------------
+    // --------------------  PUBLIC  -------------------------------------------------------------------------------
+    // -------------------------------------------------------------------------------------------------------------
+
+    function allocate(): Handle<PoolId> {
         const result = dequeueFreeSlot();
-        if (result) return result;
+        if (result !== undefined) return result;
         throw Error("Out of Slots");
     }
 
-    function freeSlot(id: Handle<PoolId>) {
+    function free(id: Handle<PoolId>) {
         initializeZero(id);
         const newHandle = increaseVersion(id);
         // check weather all versions are used. Deactivate slot if no version is free
@@ -141,11 +146,17 @@ export function newPool<PoolId extends string, S extends Struct<Field, Value>, F
         }
     }
 
+    function validate(id: Handle<PoolId>) {
+        const index = id & indexMask;
+        return 0 < index && index <= capacity // validate range
+            && getStoredHandle(id) === id; // validate object version
+    }
+
 
     const result: any = {
-        allocate: allocateSlot,
-        free: freeSlot,
-        validate: validateHandle,
+        allocate,
+        free,
+        validate,
     };
 
     let fieldOffset = bytesToStoreObjectHandle;

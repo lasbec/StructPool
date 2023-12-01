@@ -19,19 +19,25 @@ function fieldTypeName(t) {
     }
     throw Error(`Invalid field type '${t}'`);
 }
+function calculateSlotSizeInBytes(structTypeArray, bytesToStoreObjectHandle) {
+    let result = bytesToStoreObjectHandle;
+    for (const t of structTypeArray) {
+        result += sizeInBytes(t);
+    }
+    return result;
+}
 function newPool(id, struct, capacity) {
     const structTypeArray = [...Object.values(struct)];
     const bytesToStoreObjectIndex = 2;
     const bytesToStoreObjectVersion = 2;
     const bytesToStoreObjectHandle = bytesToStoreObjectIndex + bytesToStoreObjectVersion;
     const objectVersionOffset = 0;
-    /** @ts-ignore */
-    const fieldSizeInBytes = structTypeArray.reduce((a, b) => a + sizeInBytes(b), 0) + bytesToStoreObjectHandle;
-    const poolBuffer = new ArrayBuffer(fieldSizeInBytes * capacity);
+    const slotSizeInBytes = calculateSlotSizeInBytes(structTypeArray, bytesToStoreObjectHandle);
+    const poolBuffer = new ArrayBuffer(slotSizeInBytes * capacity);
     const poolView = new DataView(poolBuffer, 0, poolBuffer.byteLength);
     const freeSlotsBuffer = new ArrayBuffer((capacity + 1) * bytesToStoreObjectHandle);
     const freeSlots = new Uint32Array(freeSlotsBuffer, 0, capacity + 1).map((_, i) => i);
-    let freeSlotsHead = capacity;
+    let freeSlotsHead = capacity - 1;
     let freeSlotsTail = 0;
     let deactavatedSlots = 0;
     function queueFreeSlot(id) {
@@ -49,26 +55,21 @@ function newPool(id, struct, capacity) {
         return poolView.getInt32(byteOffset(id) + objectVersionOffset);
     }
     function getField(propertyByteOffset, fieldTypeName) {
-        const getFn = poolView[`get${fieldTypeName}`];
+        const getFn = poolView[`get${fieldTypeName}`].bind(poolView);
         return (handle) => {
             return getFn(byteOffset(handle) + propertyByteOffset);
         };
     }
     function setField(propertyByteOffset, fieldTypeName) {
-        const setFn = poolView[`set${fieldTypeName}`];
+        const setFn = poolView[`set${fieldTypeName}`].bind(poolView);
         return (handle, n) => {
             setFn(byteOffset(handle) + propertyByteOffset, n);
         };
     }
-    function validateHandle(id) {
-        const index = id & indexMask;
-        return 0 < index && index <= capacity // validate range
-            && getStoredHandle(id) === id; // validate object version
-    }
     const indexMask = Math.pow(2, bytesToStoreObjectIndex * 8);
     const versionMask = Math.pow(2, bytesToStoreObjectVersion * 8) << bytesToStoreObjectIndex * 8;
     function byteOffset(id) {
-        return (id & indexMask) * fieldSizeInBytes;
+        return (id & indexMask) * slotSizeInBytes;
     }
     function version(id) {
         return (id & versionMask);
@@ -76,7 +77,7 @@ function newPool(id, struct, capacity) {
     function initializeZero(id) {
         const offset = byteOffset(id);
         // important: skip the bytes that store the object version
-        for (let i = bytesToStoreObjectHandle; i < fieldSizeInBytes; i += 1) {
+        for (let i = bytesToStoreObjectHandle; i < slotSizeInBytes; i += 1) {
             poolView.setUint8(offset + i, 0);
         }
     }
@@ -85,13 +86,16 @@ function newPool(id, struct, capacity) {
         const vPlus = ((version(id) >> bytesToStoreObjectIndex) + 1) << bytesToStoreObjectIndex;
         return (index | vPlus);
     }
-    function allocateSlot() {
+    // -------------------------------------------------------------------------------------------------------------
+    // --------------------  PUBLIC  -------------------------------------------------------------------------------
+    // -------------------------------------------------------------------------------------------------------------
+    function allocate() {
         const result = dequeueFreeSlot();
-        if (result)
+        if (result !== undefined)
             return result;
         throw Error("Out of Slots");
     }
-    function freeSlot(id) {
+    function free(id) {
         initializeZero(id);
         const newHandle = increaseVersion(id);
         // check weather all versions are used. Deactivate slot if no version is free
@@ -105,10 +109,15 @@ function newPool(id, struct, capacity) {
             }
         }
     }
+    function validate(id) {
+        const index = id & indexMask;
+        return 0 < index && index <= capacity // validate range
+            && getStoredHandle(id) === id; // validate object version
+    }
     const result = {
-        allocate: allocateSlot,
-        free: freeSlot,
-        validate: validateHandle,
+        allocate,
+        free,
+        validate,
     };
     let fieldOffset = bytesToStoreObjectHandle;
     const keysAndTypes = [...Object.entries(struct)];
